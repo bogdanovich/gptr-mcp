@@ -5,6 +5,8 @@ This script implements an MCP server for GPT Researcher, allowing AI assistants
 to conduct web research and generate reports via the MCP protocol.
 """
 
+import asyncio
+import contextlib
 import os
 import sys
 import uuid
@@ -37,6 +39,22 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+_stdio_tool_lock = asyncio.Lock()
+
+
+def _is_stdio_transport() -> bool:
+    return os.getenv("MCP_TRANSPORT", "stdio").lower() == "stdio"
+
+
+async def _with_clean_stdio(operation):
+    """Run noisy researcher code without corrupting stdio MCP JSON-RPC."""
+    if not _is_stdio_transport():
+        return await operation()
+
+    async with _stdio_tool_lock:
+        with contextlib.redirect_stdout(sys.stderr):
+            return await operation()
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -73,13 +91,15 @@ async def research_resource(topic: str) -> str:
     researcher = GPTResearcher(topic)
     
     try:
-        # Conduct the research
-        await researcher.conduct_research()
-        
-        # Get the context and sources
-        context = researcher.get_research_context()
-        sources = researcher.get_research_sources()
-        source_urls = researcher.get_source_urls()
+        async def operation():
+            await researcher.conduct_research()
+            return (
+                researcher.get_research_context(),
+                researcher.get_research_sources(),
+                researcher.get_source_urls(),
+            )
+
+        context, sources, source_urls = await _with_clean_stdio(operation)
         
         # Format with sources included
         formatted_context = format_context_with_sources(topic, context, sources)
@@ -115,14 +135,17 @@ async def deep_research(query: str) -> Dict[str, Any]:
     
     # Start research
     try:
-        await researcher.conduct_research()
+        async def operation():
+            await researcher.conduct_research()
+            return (
+                researcher.get_research_context(),
+                researcher.get_research_sources(),
+                researcher.get_source_urls(),
+            )
+
+        context, sources, source_urls = await _with_clean_stdio(operation)
         mcp.researchers[research_id] = researcher
         logger.info(f"Research completed for ID: {research_id}")
-        
-        # Get the research context and sources
-        context = researcher.get_research_context()
-        sources = researcher.get_research_sources()
-        source_urls = researcher.get_source_urls()
         
         # Store in the research store for the resource API
         store_research_results(query, context, sources, source_urls)
@@ -161,8 +184,10 @@ async def quick_search(query: str) -> Dict[str, Any]:
     researcher = GPTResearcher(query)
     
     try:
-        # Perform quick search
-        search_results = await researcher.quick_search(query=query)
+        async def operation():
+            return await researcher.quick_search(query=query)
+
+        search_results = await _with_clean_stdio(operation)
         mcp.researchers[search_id] = researcher
         logger.info(f"Quick search completed for ID: {search_id}")
         
@@ -195,12 +220,11 @@ async def write_report(research_id: str, custom_prompt: Optional[str] = None) ->
     logger.info(f"Generating report for research ID: {research_id}")
     
     try:
-        # Generate report
-        report = await researcher.write_report(custom_prompt=custom_prompt)
-        
-        # Get additional information
-        sources = researcher.get_research_sources()
-        costs = researcher.get_costs()
+        async def operation():
+            report = await researcher.write_report(custom_prompt=custom_prompt)
+            return report, researcher.get_research_sources(), researcher.get_costs()
+
+        report, sources, costs = await _with_clean_stdio(operation)
         
         return create_success_response({
             "report": report,
