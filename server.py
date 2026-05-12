@@ -32,6 +32,8 @@ from utils import (
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s][%(levelname)s] - %(message)s',
+    stream=sys.stderr,
+    force=True,
 )
 
 logger = logging.getLogger(__name__)
@@ -289,10 +291,13 @@ def run_server():
         transport = "sse"
         logger.info("Docker environment detected, using SSE transport")
     
-    # Add startup message
     logger.info(f"Starting GPT Researcher MCP Server with {transport} transport...")
-    print(f"🚀 GPT Researcher MCP Server starting with {transport} transport...")
-    print("   Check researcher_mcp_server.log for details")
+
+    # STDIO MCP reserves stdout for JSON-RPC frames. Any human-readable output
+    # on stdout corrupts the protocol stream and makes clients fail JSON parsing.
+    if transport != "stdio":
+        print(f"GPT Researcher MCP Server starting with {transport} transport...")
+        print("Check researcher_mcp_server.log for details")
 
     # Let FastMCP handle the event loop
     try:
@@ -312,10 +317,12 @@ def run_server():
             pass  # Keep the process alive
     except Exception as e:
         logger.error(f"Error running MCP server: {str(e)}")
-        print(f"❌ MCP Server error: {str(e)}")
+        if transport != "stdio":
+            print(f"MCP Server error: {str(e)}")
         return
         
-    print("✅ MCP Server stopped")
+    if transport != "stdio":
+        print("MCP Server stopped")
 
 
 if __name__ == "__main__":
