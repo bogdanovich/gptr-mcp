@@ -28,7 +28,7 @@ def create_success_response(data: Dict[str, Any]) -> Dict[str, Any]:
 def handle_exception(e: Exception, operation: str) -> Dict[str, Any]:
     """Handle exceptions in a consistent way"""
     error_message = str(e)
-    logger.error(f"{operation} failed: {error_message}")
+    logger.exception(f"{operation} failed: {error_message}")
     return create_error_response(error_message)
 
 

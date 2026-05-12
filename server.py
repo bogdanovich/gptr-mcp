@@ -43,18 +43,53 @@ logger = logging.getLogger(__name__)
 _stdio_tool_lock = asyncio.Lock()
 
 
+class _CapturedStdout:
+    def __init__(self, operation_name: str, max_chars: int = 12000):
+        self.operation_name = operation_name
+        self.max_chars = max_chars
+        self._chunks = []
+        self._size = 0
+
+    def write(self, data: str) -> int:
+        if not data:
+            return 0
+        sys.stderr.write(data)
+        self._chunks.append(data)
+        self._size += len(data)
+        while self._size > self.max_chars and self._chunks:
+            removed = self._chunks.pop(0)
+            self._size -= len(removed)
+        return len(data)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
+
+    def captured_text(self) -> str:
+        return "".join(self._chunks).strip()
+
+
 def _is_stdio_transport() -> bool:
     return os.getenv("MCP_TRANSPORT", "stdio").lower() == "stdio"
 
 
-async def _with_clean_stdio(operation):
+async def _with_clean_stdio(operation_name: str, operation):
     """Run noisy researcher code without corrupting stdio MCP JSON-RPC."""
     if not _is_stdio_transport():
         return await operation()
 
     async with _stdio_tool_lock:
-        with contextlib.redirect_stdout(sys.stderr):
-            return await operation()
+        captured_stdout = _CapturedStdout(operation_name)
+        with contextlib.redirect_stdout(captured_stdout):
+            try:
+                return await operation()
+            finally:
+                stdout_text = captured_stdout.captured_text()
+                if stdout_text:
+                    logger.warning(
+                        "Captured stdout during stdio MCP tool operation %s: %r",
+                        operation_name,
+                        stdout_text,
+                    )
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -99,7 +134,7 @@ async def research_resource(topic: str) -> str:
                 researcher.get_source_urls(),
             )
 
-        context, sources, source_urls = await _with_clean_stdio(operation)
+        context, sources, source_urls = await _with_clean_stdio("research_resource", operation)
         
         # Format with sources included
         formatted_context = format_context_with_sources(topic, context, sources)
@@ -143,7 +178,7 @@ async def deep_research(query: str) -> Dict[str, Any]:
                 researcher.get_source_urls(),
             )
 
-        context, sources, source_urls = await _with_clean_stdio(operation)
+        context, sources, source_urls = await _with_clean_stdio("deep_research", operation)
         mcp.researchers[research_id] = researcher
         logger.info(f"Research completed for ID: {research_id}")
         
@@ -187,7 +222,7 @@ async def quick_search(query: str) -> Dict[str, Any]:
         async def operation():
             return await researcher.quick_search(query=query)
 
-        search_results = await _with_clean_stdio(operation)
+        search_results = await _with_clean_stdio("quick_search", operation)
         mcp.researchers[search_id] = researcher
         logger.info(f"Quick search completed for ID: {search_id}")
         
@@ -224,7 +259,7 @@ async def write_report(research_id: str, custom_prompt: Optional[str] = None) ->
             report = await researcher.write_report(custom_prompt=custom_prompt)
             return report, researcher.get_research_sources(), researcher.get_costs()
 
-        report, sources, costs = await _with_clean_stdio(operation)
+        report, sources, costs = await _with_clean_stdio("write_report", operation)
         
         return create_success_response({
             "report": report,
